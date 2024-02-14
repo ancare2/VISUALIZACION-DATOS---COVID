@@ -1,0 +1,672 @@
+---
+title: 'Proyecto COVID: Visualización de Datos'
+author: "Anna Cabrero Requena"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  pdf_document:
+    toc: yes
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 0. Librerías
+
+```{r warning=FALSE}
+library(shiny)
+library(dplyr)
+library(plotly)
+library(caret)
+library(mice)
+library(ggplot2)
+library(raster)
+library(ggmap)
+library(tmap)
+library(geospatial) 
+library(sp)
+library(maps)
+library(tmaptools)
+library(leaflet)
+library(rnaturalearth)
+```
+
+
+
+# 1. Introducción
+
+El objetivo de esta tarea es familiarizarse con el manejo de datos espaciales y utilizar los conocimientos adquiridos para visualizar la evolución de la expansión del COVID-19. La pandemia del COVID-19 ha tenido un impacto significativo en todo el mundo, afectando a comunidades, sistemas de salud y economías globales. Para comprender mejor la propagación y el impacto de esta enfermedad, es crucial analizar y visualizar los datos relacionados con su evolución a lo largo del tiempo y en diferentes regiones geográficas.
+
+Los datos relativos al COVID-19 se han recopilado y actualizado diariamente hasta cierta fecha y están disponibles para su descarga en el siguiente enlace: https://github.com/owid/covid-19-data/tree/master/public/data. Estos datos proporcionan una visión detallada de la propagación del virus, incluyendo información sobre casos confirmados, muertes, pruebas realizadas y medidas de control implementadas en diversos países y regiones.
+
+En este proyecto, utilizaremos herramientas de visualización de datos y técnicas de manejo de datos espaciales para explorar y representar la evolución del COVID-19 a través de mapas, gráficos y análisis espaciales. Al examinar estos datos, esperamos obtener una comprensión más profunda de la propagación del virus y sus implicaciones a nivel mundial.
+
+
+# 2. Objetivos
+
+Este proyecto tiene como propósito investigar y analizar diversos aspectos de la pandemia de COVID-19 con el fin de obtener una comprensión más completa de su impacto y evolución a nivel mundial.
+
+En primer lugar, se pretende explorar la evolución temporal del virus y examinar cómo varía el número total de casos y la tendencia de nuevas muertes diarias en distintas regiones y países. Se busca identificar las naciones con las tasas más altas y más bajas de casos totales por millón de habitantes para comprender mejor las disparidades en la incidencia del virus.
+
+Por otro lado, evaluaremos el impacto de las medidas de salud pública, como las restricciones de movilidad, en la tasa de reproducción del virus y su efectividad en la contención de la enfermedad. Se investigará si existe una correlación entre la intensidad de estas medidas y la disminución de casos y muertes.
+Para estudiar así como los diferentes países Europeos se desenvuelven y tratan esta enfermedad.
+
+Al abordar estos objetivos, se espera obtener una comprensión más profunda de los patrones de la pandemia y de los factores que influyen en su impacto en diferentes comunidades y regiones del mundo. 
+
+
+# 3. Procesamiento de datos
+ 
+## 3.1 Cargamos los datos
+
+En primer lugar, leemos el conjunto del dataset:
+
+```{r}
+datos <- read.csv("./data/owid-covid-data.csv")
+
+
+str(datos)
+head(datos)
+```
+
+
+```{r}
+dim(datos)
+```
+
+# 3.2 Adecuación de los datos
+
+# 3.2.1 Valores Faltantes
+
+Antes de realizar cualquier análisis, es fundamental examinar y abordar la presencia de valores faltantes en el conjunto de datos. En este contexto, la ausencia de datos puede distorsionar los resultados y afectar la validez de las conclusiones extraídas. Por lo tanto, se debe proceder con un tratamiento adecuado de los valores faltantes para garantizar la integridad y la fiabilidad del análisis.
+
+```{r}
+nas <- any(is.na(datos))
+
+if (nas) {
+  print("El conjunto de datos contiene valores NA.")
+} else {
+  print("El conjunto de datos no contiene valores NA.")
+}
+```
+
+```{r}
+nas_count <- colSums(is.na(datos))
+print(nas_count)
+```
+
+Después de explorar varias técnicas de imputación para nuestro estudio de datos del COVID-19, como el KNN (que resultó poco práctico debido al tiempo computacional requerido), la regresión de splines cúbicos y otras, inicialmente nos inclinamos hacia la regresión por splines cúbicos debido a su eficiencia computacional. Sin embargo, al considerar la naturaleza dinámica de nuestros datos, caracterizados por cambios abruptos en variables como el número de casos, muertes y disponibilidad de recursos sanitarios de un día a otro, encontramos que esta técnica tiende a capturar cambios suaves y continuos, lo cual no es ideal para nuestra situación. Por lo tanto, hemos decidido complementar la regresión por splines cúbicos con la interpolación lineal. La interpolación lineal es una opción más efectiva para capturar los cambios bruscos en nuestros datos, ya que nos permite estimar los valores faltantes utilizando una línea recta entre los valores observados más cercanos en el tiempo. Esta estrategia nos permitirá obtener una imputación más completa y precisa de los datos faltantes, adaptándose mejor a la naturaleza volátil de los datos del COVID-19.
+
+
+```{r}
+# Imputamos valores faltantes utilizando interpolación lineal para cambios bruscos
+
+datos_linear <- datos
+for (i in 1:ncol(datos_linear)) {
+  na_index <- which(is.na(datos_linear[, i]))
+  if (length(na_index) > 0) {
+    non_na_index <- which(!is.na(datos_linear[, i]))
+    datos_linear[na_index, i] <- approx(non_na_index, datos_linear[non_na_index, i], xout = na_index, method = "linear")$y
+  }
+}
+
+# Imputamos valores faltantes utilizando interpolación por splines cúbicos para cambios suaves
+
+datos_spline <- datos_linear
+for (i in 1:ncol(datos_spline)) {
+  na_index <- which(is.na(datos_spline[, i]))
+  if (length(na_index) > 0) {
+    non_na_index <- which(!is.na(datos_spline[, i]))
+    if (length(non_na_index) > 0) {
+      datos_spline[na_index, i] <- spline(non_na_index, datos_spline[non_na_index, i], method = "natural", xout = na_index)$y
+    }
+  }
+}
+
+```
+
+
+```{r}
+
+# Comprobamos que no quedan NAs para nuestro conjunto de datos
+
+nas_count <- colSums(is.na(datos_spline))
+print(nas_count)
+```
+
+```{r}
+df<- datos_spline
+```
+
+
+# 3.2.2 Outliers
+
+En este análisis, optaremos por no tratar los outliers presentes en el conjunto de datos. Esta decisión se fundamenta en el reconocimiento de que la presencia de valores atípicos puede deberse a una variedad de factores específicos de cada país, como diferencias en la capacidad de detección y notificación, políticas de salud pública, sistemas de atención médica, densidad de población, comportamientos sociales y culturales, entre otros. Además, la singularidad de la situación epidemiológica del COVID-19 en cada país contribuye a la heterogeneidad de los datos. Por lo tanto, su eliminación o tratamiento podría implicar la pérdida de información relevante para la comprensión completa de los patrones y las tendencias relacionadas con la enfermedad en diferentes regiones.
+
+
+# 4. Explorar las variables disponibles
+
+```{r}
+summary(df)
+```
+
+Algunos datos destacables incluyen el amplio rango de casos totales y muertes registradas, que van desde valores mínimos hasta cifras muy elevadas, lo que indica la variabilidad en la magnitud del impacto de la pandemia en distintos países. Además, las métricas relacionadas con la vacunación, como el número total de vacunas administradas y las tasas de vacunación per cápita, ofrecen información crucial sobre el progreso de la inmunización y la respuesta sanitaria. Asimismo, los estadísticos que describen la disponibilidad de recursos médicos, como camas de hospital y unidades de cuidados intensivos, son indicadores importantes para evaluar la capacidad de los sistemas de salud para hacer frente a la pandemia.
+
+
+## 4.1 Análisis temporal
+
+Como ya habíamos comentado al principio, vamos a estudiar la evolución de esta enfermedad a lo largo del tiempo, tanto en un contexto anual como diario. 
+
+Para ello, comenzaremos por visualizar un mapa del mundo que nos permitirá seleccionar la fecha y el año de interés.
+
+
+```{r warning=FALSE}
+
+ui <- fluidPage(
+  titlePanel("Total de Casos Confirmados de COVID-19"),
+  sidebarLayout(
+    sidebarPanel(
+      dateInput("fecha", "Selecciona una fecha:", value = "2022-01-01")
+    ),
+    mainPanel(
+      plotOutput("mapa")
+    )
+  )
+)
+
+
+server <- function(input, output) {
+  output$mapa <- renderPlot({
+    selected_date <- as.Date(input$fecha)
+    latest_data_filtered <- df %>%
+      filter(date == selected_date)
+    
+    map_data <- left_join(world_map, latest_data_filtered, by = c("region" = "location"))
+    
+    ggplot() +
+      geom_map(data = map_data, map = map_data,
+               aes(x = long, y = lat, map_id = region, fill = total_cases),
+               color = "black", size = 0.15) +
+      scale_fill_gradient(low = "lightblue", high = "darkred", na.value = "grey90",
+                          name = "Total de Casos", labels = scales::comma) +
+      labs(title = paste("Total de Casos Confirmados de COVID-19 en el mundo -", format(selected_date, "%d/%m/%Y")),
+           caption = "Fuente: Our World in Data",
+           fill = "Total de Casos") +
+      theme_void()
+  })
+}
+
+
+shinyApp(ui = ui, server = server)
+
+```
+
+Observando la evolución de los casos confirmados de COVID-19 en diferentes países a lo largo del tiempo, se pueden identificar tendencias significativas que reflejan la efectividad de las medidas de salud pública y la transparencia en la comunicación de datos por parte de las autoridades.
+
+Al analizar los datos por fecha, se observa que países de Sudamérica y la India han experimentado un incremento notable en el número de casos, lo cual podría atribuirse a posibles deficiencias en la implementación de medidas preventivas y de contención. Este fenómeno destaca la importancia crucial de la adopción de políticas de salud efectivas y la necesidad de fortalecer los sistemas de salud en regiones vulnerables.
+
+Por otro lado, se destaca la evolución de China en el panorama global de la pandemia. Al principio de la crisis, el país implementó medidas drásticas de contención, lo que se reflejó en una baja incidencia de casos, como se observa en los tonos azules del mapa. Sin embargo, a medida que la situación evolucionó, se evidenció un aumento significativo en el número de casos, lo que sugiere una posible flexibilización de las restricciones y una mayor movilidad de la población.
+
+En contraste, Rusia ha experimentado una evolución peculiar en el curso de la pandemia. Aunque se conocían informes de un alto número de contagios, los datos mostraban inicialmente cifras relativamente bajas. Esta discrepancia plantea interrogantes sobre la precisión y transparencia en la comunicación de datos por parte de las autoridades rusas, y sugiere la posibilidad de subestimación o manipulación de la información para proyectar una imagen de control sobre la situación.
+
+En el siguiente apartado, se explorará con mayor detalle esta evolución a través de herramientas de visualización interactiva.
+
+
+```{r}
+df$date <- as.Date(df$date)
+
+df_avg <- df %>%
+  group_by(date) %>%
+  summarize(
+    avg_new_cases = mean(new_cases, na.rm = TRUE),
+    avg_new_deaths = mean(new_deaths, na.rm = TRUE)
+  )
+
+ggplot(df_avg, aes(x = date)) +
+  geom_line(aes(y = avg_new_cases), color = "blue", linetype = 1) +
+  geom_line(aes(y = avg_new_deaths), color = "red", linetype = 2) +
+  labs(title = "Evolución de Casos Nuevos y Muertes Promedio en Europa",
+       x = "Fecha",
+       y = "Promedio") +
+  theme_minimal()
+
+```
+
+Con el objetivo de hacer una descarga de mapas que es lo que se nos solicitaba en la tarea (No lo he podido hacer en las aplicaciones shiny porque se me bloqueaba el ordenador, además la función getData() también es bastante lenta/robusta y según documentación de RStudio se va a eliminar próximamente, por ello hemos utilizado la librería "rnaturalearth" con la función "ne_countries" y especificamos el tipo "sf") así visualizamos los datos de contagios en España y en el mundo. 
+
+
+```{r}
+spain_map <- ne_countries(country = "Spain", scale = "medium", returnclass = "sf")
+
+datos_espana <- df[df$location == "Spain", ]
+
+datos_mapa_espana <- merge(spain_map, datos_espana, by.x = "iso_a3", by.y = "iso_code", all.x = TRUE)
+
+ggplot() +
+  geom_sf(data = datos_mapa_espana, aes(fill = total_cases), color = "white", lwd = 0.1) +
+  scale_fill_viridis_c(name = "Total de casos", na.value = "grey90") +
+  labs(title = "Casos de COVID-19 en España") +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+
+```{r}
+world_map <- ne_countries(scale = "medium", returnclass = "sf")
+
+world_map_cases <- left_join(world_map, df, by = c("iso_a3" = "iso_code"))
+
+ggplot() +
+  geom_sf(data = world_map_cases, aes(fill = total_cases), color = "white") +
+  scale_fill_viridis_c() +  
+  labs(title = "Casos de COVID-19 en el Mundo") +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+
+A continuación generemos otra gráfica donde podemos ir seleccionando el país del que queremos estudiar su evolución, así los podemos visualizar de una manera más sencilla por separado.
+
+```{r}
+create_plot <- function(data, country) {
+  plot_ly(data %>% filter(location == country),
+          x = ~date, y = ~total_cases,
+          type = 'scatter', mode = 'lines',
+          line = list(color = 'purple')) %>%
+    layout(title = list(text = paste("<b>Evolución de Casos de COVID-19</b>")),
+           xaxis = list(title = "Fecha"),
+           yaxis = list(title = "Casos Totales"),
+           paper_bgcolor = "white")
+}
+
+
+filter_data <- function(data, country) {
+  data %>% filter(location == country)
+}
+
+
+ui <- fluidPage(
+  titlePanel("Evolución de Casos de COVID-19"),
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("country", "Selecciona un país:",
+                  choices = unique(df$location))
+    ),
+    mainPanel(
+      plotlyOutput("plot")
+    )
+  )
+)
+
+
+server <- function(input, output) {
+  output$plot <- renderPlotly({
+    country_data <- filter_data(df, input$country)
+    create_plot(country_data, input$country)
+  })
+}
+
+
+shinyApp(ui = ui, server = server)
+
+
+```
+
+
+Ahora para hacernos una idea de la situación. Seleccionamos aquellos paises con mayor número de casos, en concreto escogemos los 10 primeros y representamos su evolución.
+
+```{r}
+top_countries <- df %>%
+  group_by(location) %>%
+  summarize(max_total_cases = max(total_cases, na.rm = TRUE)) %>%
+  top_n(10, max_total_cases)  
+
+filtered_data <- df %>%
+  filter(location %in% top_countries$location)
+
+# Graficar la evolución de casos totales por país
+ggplot(data = filtered_data, aes(x = date, y = total_cases, color = location)) +
+  geom_line() +
+  labs(title = "Casos Totales TOP10 Mundial",
+       x = "Fecha", y = "Casos Totales") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+
+
+
+
+
+## 4.2 Impacto de las Medidas de Salud Pública
+
+En este apartado, nos dedicaremos a investigar y explorar las variables que influyen en el impacto de las medidas de salud pública.
+
+### Medidas materiales
+
+```{r}
+
+ui <- fluidPage(
+  titlePanel("Respuesta a la Pandemia entre Países"),
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("indicator", "Selecciona un indicador:",
+                  choices = c("Densidad de Población", "Ingreso Per Cápita", "Camas de Hospital por 1000 Habitantes"),
+                  selected = "Densidad de Población")
+    ),
+    mainPanel(
+      plotlyOutput("mapa")
+    )
+  )
+)
+
+
+server <- function(input, output) {
+  output$mapa <- renderPlotly({
+    
+    indicator_data <- switch(input$indicator,
+                             "Densidad de Población" = df$population_density,
+                             "Ingreso Por Cápita" = df$gdp_per_capita,
+                             "Camas de Hospital por 1000 Habitantes" = df$hospital_beds_per_thousand)
+    
+   
+    plot_ly(data = df, type = 'choropleth', 
+            locations = ~location, locationmode = "country names", 
+            z = ~indicator_data, color = ~indicator_data, text = ~paste(location, "<br>", input$indicator, ": ", indicator_data),
+            marker = list(line = list(color = 'rgb(255,255,255)', width = 0.5)),
+            colorbar = list(title = input$indicator)) %>%
+      layout(title = paste("Carga de la Enfermedad -", input$indicator),
+             geo = list(showframe = FALSE, showcoastlines = TRUE, projection = list(type = 'mercator')))
+  })
+}
+
+
+shinyApp(ui = ui, server = server)
+
+```
+
+
+Se puede apreciar que los países con mayores ingresos per cápita mostraron una mayor capacidad para hacer frente a la pandemia, posiblemente debido a sus mayores recursos financieros y tecnológicos disponibles. Por otro lado, se observa que las zonas con una alta densidad de población presentaban un número relativamente bajo de camas de hospital, lo que podría sugerir una infraestructura de salud menos adecuada para atender una gran cantidad de pacientes durante la pandemia.
+
+
+```{r}
+library(dplyr)
+
+umbral_densidad <- 500  
+umbral_camas <- 20      
+
+paises_filtrados <- df %>%
+  filter(population_density > umbral_densidad & hospital_beds_per_thousand < umbral_camas)
+paises_filtrados
+```
+
+
+El número de test que cada país disponía era y sigue siendo un factor muy importante, que en ocasiones contábamos con una cantidad escasa.
+
+```{r}
+library(dplyr)
+
+total_tests_by_country <- df %>%
+  group_by(location) %>%
+  summarize(total_tests = sum(total_tests_per_thousand, na.rm = TRUE)) %>%
+  arrange(desc(total_tests))
+
+country_max_tests <- total_tests_by_country[1, ]
+
+country_min_tests <- total_tests_by_country[nrow(total_tests_by_country), ]
+
+print("País que ha realizado más pruebas:")
+print(country_max_tests)
+print("País que ha realizado menos pruebas:")
+print(country_min_tests)
+
+```
+
+
+Visualizamos la gran diferencia entre los dos países:
+
+```{r}
+data_to_plot <- rbind(country_max_tests, country_min_tests)
+
+
+ggplot(data_to_plot, aes(x = location, y = total_tests)) +
+  geom_bar(stat = "identity", fill = c("blue", "red")) +
+  labs(title = "Comparación de la cantidad de pruebas entre países",
+       x = "País",
+       y = "Número total de pruebas") +
+  theme_minimal()
+
+```
+
+Por último como ya sabemos, la mejor manera de combatir esta enfermedad es vacunandonos. Vamos a obtener el top 10 de países con la tasa de vacunación más elevada.
+
+```{r}
+top_countries <- df %>%
+  group_by(location) %>%
+  summarize(total_vaccinations_per_hundred = max(total_vaccinations_per_hundred)) %>%
+  arrange(desc(total_vaccinations_per_hundred)) %>%
+  head(10)
+
+
+ggplot(top_countries, aes(x = reorder(location, total_vaccinations_per_hundred), y = total_vaccinations_per_hundred)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(title = "Top 10 Países con Mayor Tasa de Vacunación",
+       x = "País",
+       y = "Tasa de Vacunación por Cada Cien Habitantes") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+### Restricciones
+
+La variables que vamos a explorar ahora son las restricciones en cada país como varían a lo largo del tiempo.
+
+```{r}
+ui <- fluidPage(
+  titlePanel("Índice de Restricción por País durante la Pandemia"),
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("country", "Selecciona un país:",
+                  choices = unique(df$location),
+                  selected = "Spain") 
+    ),
+    mainPanel(
+      plotOutput("restriction_plot")
+    )
+  )
+)
+
+
+server <- function(input, output) {
+  
+ 
+  country_data <- reactive({
+    df %>%
+      filter(location == input$country)
+  })
+  
+
+  output$restriction_plot <- renderPlot({
+    ggplot(country_data(), aes(x = date, y = stringency_index)) +
+      geom_line(color = "blue") +
+      labs(title = paste("Índice de Restricción para", input$country),
+           x = "Fecha",
+           y = "Índice de Restricción")
+  })
+}
+
+shinyApp(ui = ui, server = server)
+
+```
+
+Si nos fijamos por ejemplo en la gráfica de España, podemos ver como en el momento que se establecieron restricciones, el número de casos disminuyó.
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+data_filtered <- df %>%
+  filter(date >= "2019-01-01" & date <= "2020-05-31")
+
+country_stringency <- data_filtered %>%
+  group_by(location) %>%
+  summarize(mean_stringency = mean(stringency_index, na.rm = TRUE)) 
+
+country_max_stringency <- country_stringency %>%
+  filter(mean_stringency == max(mean_stringency))
+
+country_min_stringency <- country_stringency %>%
+  filter(mean_stringency == min(mean_stringency))
+
+cat('País con índice de restricciones más alto:', country_max_stringency$location, '\n')
+cat('País con índice de restricciones más bajo:', country_min_stringency$location[1], '\n')
+
+
+
+```
+
+
+
+# 5. Visualizaciones
+
+## 5.1 Visualización temporal
+
+```{r}
+df$date <- as.Date(df$date)
+```
+
+```{r warning=FALSE}
+ui <- fluidPage(
+  titlePanel("Evolución de Casos Confirmados de COVID-19"),
+  sidebarLayout(
+    sidebarPanel(
+      sliderInput("fecha", "Selecciona una fecha:",
+                  min = min(df$date), max = max(df$date), value = min(df$date),
+                  timeFormat = "%Y-%m-%d", 
+                  step = 1,   
+                  animate = animationOptions(interval = 100, loop = TRUE)) 
+    ),
+    mainPanel(
+      plotlyOutput("mapa")
+    )
+  )
+)
+
+```
+
+
+```{r warning=FALSE}
+server <- function(input, output) {
+  output$mapa <- renderPlotly({
+    selected_date <- input$fecha
+    filtered_data <- df %>%
+      filter(date == selected_date)
+    
+    plot_ly(data = filtered_data, type = 'choropleth', 
+            locations = ~location, locationmode = "country names", 
+            z = ~total_cases, color = ~total_cases, text = ~paste(location, "<br>Total de Casos:", total_cases),
+            marker = list(line = list(color = 'rgb(255,255,255)', width = 0.5)),
+            colorbar = list(title = "Total de Casos")) %>%
+      layout(title = paste("Total de Casos Confirmados de COVID-19 en Europa -", selected_date),
+             geo = list(showframe = FALSE, showcoastlines = TRUE, projection = list(type = 'mercator')))
+  })
+}
+
+```
+
+
+```{r warning=FALSE}
+shinyApp(ui = ui, server = server)
+```
+
+Como hemos mencionado previamente, al observar la evolución de los casos de COVID-19 en diferentes países, se destacan tendencias importantes relacionadas con las medidas de salud pública y la transparencia en la comunicación de datos.
+
+Se observa un aumento notable en Sudamérica e India, sugiriendo deficiencias en medidas preventivas. China mostró una baja inicial gracias a medidas drásticas, pero luego experimentó un aumento, posiblemente debido a flexibilización de restricciones. En contraste, Rusia mostró cifras iniciales bajas, planteando dudas sobre la precisión de sus datos.
+
+
+
+## 5.2 Visualización de medidas y mitigación de la sanidad pública.
+
+
+```{r}
+df$date <- as.Date(df$date)
+
+ui <- fluidPage(
+  titlePanel("Evolución de Métricas de COVID-19"),
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("metric", "Selecciona una métrica:",
+                  choices = c("Casos Confirmados", "Pruebas Realizadas", "Tasa de Positividad", "Tasa de Vacunación", "Índice de Restricción"),
+                  selected = "Casos Confirmados"),
+      sliderInput("fecha", "Selecciona una fecha:",
+                  min = min(df$date), max = max(df$date), value = min(df$date),
+                  timeFormat = "%Y-%m-%d", 
+                  step = 1,
+                  animate = animationOptions(interval = 100, loop = TRUE)) 
+    ),
+    mainPanel(
+      plotlyOutput("mapa")
+    )
+  )
+)
+
+
+server <- function(input, output) {
+  output$mapa <- renderPlotly({
+    selected_date <- input$fecha
+    metric <- switch(input$metric,
+                     "Casos Confirmados" = "total_cases",
+                     "Pruebas Realizadas" = "total_tests",
+                     "Tasa de Positividad" = "positive_rate",
+                     "Tasa de Vacunación" = "total_vaccinations_per_hundred",
+                     "Índice de Restricción" = "stringency_index")
+    
+    filtered_data <- df %>%
+      filter(date == selected_date)
+
+    plot_ly(data = filtered_data, type = 'choropleth', 
+            locations = ~location, locationmode = "country names", 
+            z = ~get(metric), color = ~get(metric), text = ~paste(location, "<br>", input$metric, ": ", get(metric)),
+            marker = list(line = list(color = 'rgb(255,255,255)', width = 0.5)),
+            colorbar = list(title = input$metric)) %>%
+      layout(title = paste(input$metric, "de COVID-19 -", selected_date),
+             geo = list(showframe = FALSE, showcoastlines = TRUE, projection = list(type = 'mercator')))
+  })
+}
+
+shinyApp(ui = ui, server = server)
+
+```
+
+
+Las medidas para prevenir la propagación del COVID-19 han sido variadas y han enfrentado desafíos en diferentes regiones del mundo. En Sudamérica, la respuesta ha sido desigual debido a la falta de recursos y coordinación en algunos países, lo que ha llevado a altas tasas de contagio. En China, se implementaron medidas drásticas y estrictas de contención desde el principio, aunque posteriormente se incrementaron los casos. En Europa, se han registrado casos significativos y la falta de datos en África ha dificultado la evaluación precisa de la situación y la implementación efectiva de medidas preventivas.
+
+
+# 6. Resultados
+
+Los resultados obtenidos revelan una clara correlación entre el número de casos de contagio y las medidas implementadas para contener la pandemia. Esta relación recíproca sugiere que las acciones tomadas para mitigar la propagación del virus tienen un impacto significativo en la incidencia de casos.
+
+En cuanto a la distribución geográfica de los contagios, se observa una mayor concentración en países como China y Sudamérica, mientras que en África se registra un número relativamente bajo de contagios, posiblemente debido a limitaciones en la recolección de datos y la implementación de medidas de contención. Además, se identifica una falta de transparencia en la divulgación de cifras por parte de países como Rusia, lo que dificulta una evaluación precisa de la situación.
+
+Por otro lado, al analizar las medidas de mitigación adoptadas, se destaca el papel crucial de la sanidad pública y el desarrollo socioeconómico en la capacidad de respuesta ante la pandemia. Países con sistemas de salud más robustos, como los de Europa, han logrado frenar la propagación del virus de manera más efectiva. Asimismo, se observa una influencia significativa de factores como la disponibilidad de camas de hospital por cada 1000 habitantes, especialmente en regiones con alta densidad poblacional. Por último, se evidencia que los países con tasas de vacunación más elevadas han experimentado una mejor evolución en el control de la pandemia, lo que subraya la importancia de la vacunación como estrategia fundamental en la lucha contra el COVID-19.
+
+
+
+# 7. Conclusiones
+
+
+El presente estudio proporciona una visión integral y detallada sobre la evolución de la pandemia de COVID-19 y las medidas implementadas para contenerla en diversas regiones del mundo. A través del análisis temporal de los casos de contagio y la evaluación de las estrategias de prevención adoptadas, se ha evidenciado la complejidad y la interrelación de factores que influyen en la propagación del virus.
+
+Los resultados obtenidos revelan patrones geográficos en la incidencia de casos, destacando la importancia de factores como el desarrollo socioeconómico, la disponibilidad de recursos médicos y la eficacia de las medidas preventivas. Se ha observado una clara correlación entre la adopción de medidas de salud pública y la disminución de los contagios, subrayando la relevancia de una respuesta coordinada y basada en la evidencia científica.
+
+Asimismo, se ha puesto de manifiesto el papel crucial de la vacunación en la contención de la pandemia, resaltando la necesidad de promover la inmunización masiva como una estrategia fundamental para controlar la propagación del virus y proteger la salud pública a nivel global.
+
+En conjunto, este estudio ofrece una contribución significativa al entendimiento de la dinámica de la pandemia.Destaca la necesidad de fortalecer los sistemas de salud y promover una comunicación transparente y basada en la evidencia científica para enfrentar crisis sanitarias. Además, resalta la importancia de valorar la salud como un activo fundamental y de invertir en la preparación y respuesta ante emergencias de salud pública.
